@@ -1,0 +1,197 @@
+# Created 2019-07-05 Fri 11:27
+#+TITLE: Protobuf Reading and Writting in R
+#+AUTHOR: Fred K. Gruber
+#+property: header-args :tangle yes :eval never-export
+#+property: header-args:R :session *R* :exports both
+-----
+
+* Introduction
+Protocol buffers (protobuf) are a method developed by Google ([[proto)]] for
+serializing structured data that is both language  and platform
+neutral.
+
+The structure of the information is defined using a protocol buffer
+message type in a .proto file. The protobuf program then generates
+source code from this description for generating or parsing stream of
+bytes that represent the structured data. Unfortunately, R is not one
+of the languages supported.
+
+Instead, the RProtobuf [[(rproto)]] R package provides a convenient wrapper around the
+C++ version of the protobuf interface which can be used to read and
+write protobuf messages.
+
+The RProtobuf package provide functions for writing a single message to a
+binary file. However, it does not provide any functionality to write
+multiple messages (in fact only the java version of protobuf provides
+this functionality). The standard way to including multiple protobuf
+messages in one binary file is to precede the message by its byte size
+in varint format (Variable Length Integer) ([[varint]]). This is how functions
+~parseDelimitedFrom~ and ~writeDelimitedTo~ in the java implementation
+work. A python implementation of this procedure is given at [[(python]]).
+
+#+results: 
+[[file:./fig_messages.png]]
+
+I was unable to find any  R implementations of the varint encoders and
+decoders required to convert the message size to the right format so I
+ended up simplifying and rewriting the python versions available at
+[[(decoder]]) and [[(encoder]]) .
+
+
+* Example
+First we need a ~.proto~ file with the definition of the structure
+of the messages. For example, in the following code block I show the
+example in the protobuf tutorial ([[proto)]]. This code is provided in the 
+~./Code/example.proto~ file.
+#+begin_src ascii
+
+syntax = "proto2";
+
+package example;
+
+message Person {
+  required string name = 1;
+  required int32 id = 2;
+  optional string email = 3;
+
+  enum PhoneType {
+    MOBILE = 0;
+    HOME = 1;
+    WORK = 2;
+  }
+
+  message PhoneNumber {
+    required string number = 1;
+    optional PhoneType type = 2 [default = HOME];
+  }
+
+  repeated PhoneNumber phones = 4;
+ }
+
+message AddressBook {
+  repeated Person people = 1;
+}
+#+end_src
+
+** Load Protobuf Definition
+In R we first need to load the ~.proto~ file using the
+~readProtoFiles~ function.
+#+begin_src R
+library("RProtoBuf")
+source("./Code/varint.R")
+readProtoFiles("./Code/example.proto")
+#+end_src
+
+Then we can create two messages that we would like to write to a binary file.
+#+begin_src R
+p1 = new(example.Person, id = 1, name = 'Dirk')
+p1$email = "test@test.com"
+p2 = new(example.Person, id = 2)
+p2$name = "Mary"
+print(p1)
+print(p2)
+#+end_src
+#+results: 
+: name: "Dirk"
+: id: 1
+: email: "test@test.com"
+: name: "Mary"
+: id: 2
+
+** Write Protobuf To binary file
+The function ~VarintBytes32~ given in the ~./Code/~ folder is used to
+encode the message length using the varint format. The length is
+written to the binary file with the funciton ~writeBin~ while the
+actual message is written using the ~serialize~ function.
+
+#+begin_src R
+fname = "./Code/binproto.protobuf"
+fileo = file(fname, open = "wb", raw = TRUE)
+mysize = VarintBytes32(p1$bytesize())
+writeBin(mysize, fileo)
+p1$serialize(fileo)
+
+mysize2 = VarintBytes32(p2$bytesize())
+writeBin(mysize2, fileo)
+p2$serialize(fileo)
+close(fileo)
+#+end_src
+
+There should now be a file called ~binproto.protobuf~ on the Code
+folder with the binary content.
+
+#+begin_src R
+system("ls -l ./Code")
+#+end_src
+
+#+results: 
+: total 24
+: -rw-r--r--  1 fred  staff   33 Apr  8 20:38 binproto.protobuf
+: -rw-r--r--  1 fred  staff  409 Apr  8 20:29 example.proto
+: -rw-r--r--  1 fred  staff  911 Apr  8 20:13 varint.R
+
+
+#+begin_src R
+system("cat ./Code/binproto.protobuf", intern=TRUE)
+#+end_src
+
+#+results: 
+: [1] "\027"                                 
+: [2] "\004Dirk\020\001\032\rtest@test.com\b"
+: [3] "\004Mary\020\002"
+
+** Read Protobuf file
+In order to read the binary protobuf file it is necessary to first
+read the binary file to memory. 
+#+begin_src R
+fileloc = "Code/binproto.protobuf"
+alldata = readBin(fileloc, "raw", file.size(fileloc))
+alldata
+#+end_src
+
+#+results: 
+:  [1] 17 0a 04 44 69 72 6b 10 01 1a 0d 74 65 73 74 40 74 65 73 74 2e 63 6f 6d 08
+: [26] 0a 04 4d 61 72 79 10 02
+
+
+Then the function ~DecodeVarint32~ is used to decode the length of the
+message as well as the start position. With this information it is
+possible to parse the protobuf using the ~read~ function. This is
+repeated for every message.
+#+begin_src R
+n = 1
+pos = DecodeVarint32(alldata,n)
+clen = pos[[1]]
+n = pos[[2]]
+nend = n + clen - 1
+tmp = alldata[n:nend]
+p1_read = example.Person$read(tmp)
+n = clen + n
+pos = DecodeVarint32(alldata,n)
+clen = pos[[1]]
+n = pos[[2]]
+nend = n + clen - 1
+tmp = alldata[n:nend]
+p2_read = example.Person$read(tmp)
+
+print(p1_read)
+print(p2_read)
+#+end_src
+
+#+results: 
+: 
+: name: "Dirk"
+: id: 1
+: email: "test@test.com"
+: 
+: name: "Mary"
+: id: 2
+
+
+* References
+1. <<proto>> https://developers.google.com/protocol-buffers/
+2. <<python>> https://www.datadoghq.com/blog/engineering/protobuf-parsing-in-python/
+3. <<rproto>> https://cran.r-project.org/web/packages/RProtoBuf/
+4. <<encoder>> https://github.com/protocolbuffers/protobuf/blob/master/python/google/protobuf/internal/encoder.py
+5. <<decoder>> https://raw.githubusercontent.com/protocolbuffers/protobuf/master/python/google/protobuf/internal/decoder.py
+6. <<varint>> https://carlmastrangelo.com/blog/lets-make-a-varint
